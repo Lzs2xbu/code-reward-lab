@@ -1,0 +1,63 @@
+# macOS and editor files
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Local workspace metadata
+.agents/
+AGENTS.md
+memory
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Runtime logs and experiment outputs
+*.log
+logs/
+output/
+outputs/
+eval_results/
+wandb/
+runs/
+checkpoints/
+ckpt/
+
+# Model and tokenizer artifacts
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+tokenizer.json
+tokenizer.model
+
+# Generated datasets and intermediate tensors
+*.parquet
+*.arrow
+*.jsonl
+*.npy
+*.npz
+log_probs
+resp_logits-
+
+# Local notes and non-reusable/private documentation
+docs/*.pdf
+docs/superpowers/
+docs/troubleshooting_log.md
+docs/verl_grpo_lessons.md
+gsm8k_training_report.md
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
