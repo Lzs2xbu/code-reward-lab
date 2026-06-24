@@ -50,7 +50,7 @@ tokenizer.model
 log_probs
 resp_logits-
 
-# Local notes and non-reusable/private documentation
+# Local notes and non-reusable documentation
 docs/*.pdf
 docs/superpowers/
 docs/troubleshooting_log.md

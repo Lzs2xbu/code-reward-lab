@@ -18,13 +18,13 @@ Generated datasets, model checkpoints, logs, local workspace metadata, PDFs, con
 
 | Area | Main files | Purpose |
 | --- | --- | --- |
-| MBPP prep | `data/prepare_mbpp.py`, `data/prepare_mbpp_v2.py`, `data/prepare_mbpp_opd_cl.py` | Build veRL-compatible MBPP parquet files and OPD/CL variants. |
+| MBPP prep | `data/prepare_mbpp.py`, `data/prepare_mbpp_v2.py`, `data/prepare_mbpp_opd_cl.py` | Build veRL-compatible MBPP parquet files with function-name injection and OPD/CL variants. |
 | APPS/LCB prep | `data/prepare_apps.py`, `data/prepare_lcb.py` | Convert APPS and LiveCodeBench-style data into training/eval tables. |
-| Teacher signals | `data/precompute_teacher_logprobs.py`, `scripts/prepare_mbpp_1_5b_teacher_sft.py` | Generate teacher responses or token-level teacher log-probs. |
+| Teacher signals | `data/precompute_teacher_logprobs.py`, `scripts/prepare_mbpp_1_5b_teacher_sft.py`, `scripts/prepare_apps_teacher_sft.py` | Generate teacher responses, teacher-pass SFT rows, or token-level teacher log-probs. |
 | Rewards | `rewards/mbpp_reward.py`, `rewards/mbpp_reward_opd.py`, `rewards/lcb_reward.py` | Execute generated code in a constrained subprocess and return binary/partial rewards. |
-| Training | `scripts/run_mbpp_*.sh`, `scripts/run_apps_*.sh`, `scripts/run_arm_e_v2_chain.sh` | Launch veRL GRPO, OPD, and SFT-warmup experiments. |
-| Evaluation | `eval/eval_mbpp.py`, `eval/eval_lcb.py`, `eval/run_eval_v2.sh` | Run vLLM generation and compute pass@k-style metrics. |
-| veRL patches | `scripts/apply_verl_opd_patch.sh`, `scripts/patch_arm_cd.py` | Apply local OPD-related modifications to a veRL checkout. |
+| Training | `scripts/run_mbpp_*.sh`, `scripts/run_apps_*.sh`, `scripts/run_arm_e_v2_chain.sh` | Launch veRL GRPO, OPD, SFT-warmup, APPS teacher-SFT, and MBPP Arm A/B/D experiments. |
+| Evaluation | `eval/eval_mbpp.py`, `eval/eval_lcb.py`, `eval/run_eval_v2.sh`, `scripts/eval_lcb_teacher_sft.sh` | Run vLLM generation and compute pass@k-style metrics. |
+| veRL patches | `scripts/apply_verl_opd_patch.sh`, `scripts/patch_arm_cd.py`, `docs/verl_patch_inventory.md` | Apply or audit local OPD-related modifications to a veRL checkout. |
 
 ## Environment
 
@@ -41,14 +41,14 @@ Typical runtime assumptions:
 - Training/evaluation parquet files under `$HOME/data/...`.
 - Model checkpoints under `$HOME/models/...`.
 
-Some legacy shell launchers still contain the original cluster Python path, such as `${PYTHON:-python}`. Replace that path with your own environment path, or adapt the launcher before running it on a different machine.
+Shell launchers use environment-variable defaults such as `${PYTHON:-python}`, `${RAY_BIN:-ray}`, `${VERL_DIR:-verl}`, `${MODEL_DIR:-$HOME/models}`, and `${DATA_DIR:-$HOME/data}`. Override them before running on a new machine.
 
 ## Common Workflows
 
 Prepare MBPP data:
 
 ```bash
-python data/prepare_mbpp_v2.py --input_dir data/mbpp --output_dir data/mbpp_v2
+python data/prepare_mbpp.py --output_dir data/mbpp_v2
 ```
 
 Run MBPP evaluation:
