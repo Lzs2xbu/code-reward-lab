@@ -863,6 +863,58 @@ VAL_FILE=$HOME/data/lcb/lcb_v5_verl.parquet
 - `lcb_v5_verl.parquet`：训练过程中的验证集格式，给 veRL 定期 eval 和保存 best checkpoint 用。
 - 两者题目来源基本一致，主要差别是字段 schema 适配不同调用方。
 
+## Q18：为什么 MBPP 都是用 veRL 格式数据做评估？
+
+因为 MBPP 的评估需求很简单，veRL 格式已经完整包含 standalone eval 所需的信息，所以项目里没有再额外做一份“非 veRL eval 格式”。
+
+`data/prepare_mbpp.py` 生成 `mbpp_train.parquet` 和 `mbpp_test.parquet` 时，直接把每条样本写成四列：
+
+```text
+prompt, data_source, reward_model, extra_info
+```
+
+其中：
+
+| 列 | MBPP eval 中的作用 |
+|---|---|
+| `prompt` | chat message list，`eval/eval_mbpp.py` 用 `apply_chat_template()` 转成模型输入 |
+| `reward_model["ground_truth"]` | JSON 字符串，里面是 `test_list` 的 assert 测试 |
+| `extra_info["task_id"]` | 记录题号，写入 eval result |
+| `data_source="mbpp"` | veRL reward 路由用；standalone eval 不太依赖 |
+
+`eval/eval_mbpp.py` 本身就是按这个 schema 写的：
+
+```python
+raw_prompts = df["prompt"].tolist()
+prompts = [
+    tokenizer.apply_chat_template(p, tokenize=False, add_generation_prompt=True)
+    for p in raw_prompts
+]
+
+test_list = json.loads(row.reward_model["ground_truth"])
+passed_all = all(run_in_sandbox(code, t) for t in test_list)
+```
+
+所以同一个 `mbpp_test.parquet` 可以同时服务两种场景：
+
+- veRL 训练期间 validation：launcher 里 `data.val_files=${TEST_FILE}`。
+- 训练后 standalone eval：`eval/eval_mbpp.py --test_file $HOME/data/mbpp_v2/mbpp_test.parquet`。
+
+LCB 之所以拆成非 veRL 格式和 veRL 格式，是因为 LCB 更复杂：
+
+- 需要保留 `title/difficulty/platform/execution_type` 做统计和分组评估。
+- 原始题目包含 HTML，需要清理后保存可读 prompt。
+- 有 `stdin_stdout` 和 `leetcode_fn` 两类执行模式，当前 eval 只支持 stdin/stdout 子集。
+- standalone `eval/eval_lcb.py` 读取的是 `prompt/tests/title/platform/difficulty` 这套更适合评估报告的 schema。
+- veRL trainer 则只认 `prompt/data_source/reward_model/extra_info` 这套训练/验证 schema。
+
+因此，更准确的说法是：
+
+- MBPP：数据结构简单，veRL schema 已足够表达评估集，所以复用同一份 parquet。
+- LCB：评估元信息和执行模式更复杂，所以保留一份 eval-friendly parquet，再额外转换一份 veRL validation parquet。
+
+这个设计的代价是：MBPP 的 veRL parquet 不方便直接人工看原始字段，例如 `text/code/test_setup_code/challenge_test_list` 不在当前 parquet 中。如果要做更细的数据分析或 reference-code SFT，需要回到 Hugging Face 原始数据或 `data/raw/mbpp_hf_full/*.jsonl`。
+
 ## 原始数据示例
 
 以下示例来自 `data/raw/mbpp_hf_full/train.jsonl`，为阅读方便省略了 `code` 全文。
