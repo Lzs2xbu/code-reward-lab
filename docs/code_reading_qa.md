@@ -817,6 +817,52 @@ adv_i = (score_i - mean(scores_for_same_uid)) / (std(scores_for_same_uid) + epsi
 - 对同一 prompt 的 8 个 rollout 全部 reward 相同的零优势样本做跳过或重采样。
 - 对过高 pass-rate 的 prompt 降采样，对有区分度但不过难的 prompt 提权。
 
+## Q17：LCB 的非 veRL 格式数据是用来做什么的？是测试集评估么？
+
+是的，LCB 的非 veRL 格式数据主要就是给 standalone eval harness 做正式/离线测试集评估用的。
+
+`data/prepare_lcb.py` 会从 `livecodebench/code_generation_lite` 下载原始 JSONL，并保存几类 parquet：
+
+| 文件 | 主要用途 | 典型读取方 |
+|---|---|---|
+| `lcb_v5_all.parquet` | 完整处理后集合，包含 `stdin_stdout` 和 `leetcode_fn` | 数据检查、统计、后续扩展 |
+| `lcb_v5_stdin_stdout.parquet` | 当前主评测集，只保留 Codeforces/AtCoder 这类 stdin/stdout 题 | `eval/eval_lcb.py`、`scripts/eval_lcb_baseline.sh`、`scripts/eval_lcb_teacher_sft.sh` |
+| `lcb_v5_leetcode.parquet` | LeetCode 函数调用题子集 | 暂存；当前 eval 脚本暂不支持 |
+| `lcb_v5_verl.parquet` | veRL trainer validation 格式 | GRPO 脚本的 `data.val_files` |
+
+非 veRL 格式的核心列是：
+
+```text
+question_id, title, difficulty, platform, execution_type, prompt, tests, split_tag
+```
+
+其中 `prompt` 是 JSON 字符串形式的 chat messages，`tests` 是 JSON 字符串形式的 stdin/stdout 测试用例。`eval/eval_lcb.py` 读取这个格式后，会：
+
+1. 读 `prompt`，用 tokenizer 的 `apply_chat_template()` 转成模型输入。
+2. 用 vLLM 每题生成 `n_samples` 条答案。
+3. 从模型输出里提取 Python 代码。
+4. 对每条代码逐个运行 `tests` 里的 stdin/stdout case。
+5. 统计每题 `c` 个通过样本，并计算 pass@1 / pass@5。
+
+veRL 格式则是同一批 `stdin_stdout` 题换成 trainer 需要的 schema：
+
+```text
+prompt, data_source, reward_model, extra_info
+```
+
+它的 `reward_model["ground_truth"]` 放的是测试用例 JSON 字符串，`data_source="lcb"` 会路由到 `rewards/lcb_reward.py`。这个文件不是用来训练 APPS/MBPP 的，而是在 GRPO 训练过程中作为 validation file，例如 APPS 训练脚本里：
+
+```bash
+TRAIN_FILE=$HOME/data/apps/apps_rl_interview.parquet
+VAL_FILE=$HOME/data/lcb/lcb_v5_verl.parquet
+```
+
+所以可以这样理解：
+
+- `lcb_v5_stdin_stdout.parquet`：正式测试/离线评估用，产出 pass@k JSON 结果。
+- `lcb_v5_verl.parquet`：训练过程中的验证集格式，给 veRL 定期 eval 和保存 best checkpoint 用。
+- 两者题目来源基本一致，主要差别是字段 schema 适配不同调用方。
+
 ## 原始数据示例
 
 以下示例来自 `data/raw/mbpp_hf_full/train.jsonl`，为阅读方便省略了 `code` 全文。
