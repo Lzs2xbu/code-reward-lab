@@ -42,6 +42,7 @@ tokenizer.json
 tokenizer.model
 
 # Generated datasets and intermediate tensors
+data/raw/
 *.parquet
 *.arrow
 *.jsonl

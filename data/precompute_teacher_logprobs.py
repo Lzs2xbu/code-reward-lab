@@ -44,6 +44,8 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
+from rewards.mbpp_reward import extract_code
+
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -75,9 +77,7 @@ def extract_func_name(ground_truth_str: str) -> str | None:
 
 def run_tests(code: str, tests: list[str]) -> tuple[int, int]:
     """在隔离子进程中执行代码 + 测试，返回 (passed, total)"""
-    script = code + "\n" + "\n".join(
-        f"try:\n    {t}\nexcept Exception:\n    pass" for t in tests
-    )
+    code = extract_code(code)
     passed = 0
     for test in tests:
         full = code + f"\ntry:\n    {test}\n    print('OK')\nexcept Exception as e:\n    print('FAIL', e)\n"

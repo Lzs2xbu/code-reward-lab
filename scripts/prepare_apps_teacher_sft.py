@@ -122,6 +122,22 @@ def eval_solution(code_str: str, ground_truth_json: str, timeout: int) -> bool:
     return True
 
 
+def normalize_messages(prompt_obj) -> list[dict]:
+    """Normalize parquet prompt values to a chat message list."""
+    if hasattr(prompt_obj, "tolist"):
+        prompt_obj = prompt_obj.tolist()
+    if isinstance(prompt_obj, tuple):
+        prompt_obj = list(prompt_obj)
+    if isinstance(prompt_obj, str):
+        try:
+            prompt_obj = json.loads(prompt_obj)
+        except json.JSONDecodeError:
+            return [{"role": "user", "content": prompt_obj}]
+    if isinstance(prompt_obj, list):
+        return prompt_obj
+    return [{"role": "user", "content": str(prompt_obj)}]
+
+
 # ─── 断点续跑 ─────────────────────────────────────────────────────────────────
 
 def load_checkpoint(checkpoint_file: str) -> dict:
@@ -187,9 +203,7 @@ def main():
         # 构建 prompt 列表（chat template）
         prompts_text = []
         for _, row in remaining.iterrows():
-            msgs = row["prompt"]
-            if isinstance(msgs, (list, tuple)):
-                msgs = list(msgs)
+            msgs = normalize_messages(row["prompt"])
             text = tokenizer.apply_chat_template(
                 msgs, add_generation_prompt=True, tokenize=False
             )
@@ -227,10 +241,7 @@ def main():
                 "difficulty":  row["difficulty"],
                 "teacher_pass": teacher_pass,
                 "response": best_response,
-                "prompt": json.dumps(
-                    list(row["prompt"]) if not isinstance(row["prompt"], str)
-                    else row["prompt"]
-                ),
+                "prompt": json.dumps(normalize_messages(row["prompt"]), ensure_ascii=False),
             }
             save_checkpoint(args.checkpoint_file, result)
             done[qid] = result

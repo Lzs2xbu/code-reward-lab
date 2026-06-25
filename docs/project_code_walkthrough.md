@@ -8,6 +8,8 @@
 - reward/eval harness 如何把模型输出转成训练信号和 pass@k 指标。
 - 当前仓库能确认什么，哪些由 `docs/verl_patch_inventory.md` 记录，哪些仍需训练日志补证。
 
+读码过程中的随问随答记录在 `docs/code_reading_qa.md`。
+
 ## 0. 仓库边界
 
 当前仓库保存的是：
@@ -102,7 +104,7 @@ Your function must be named `<func_name>`.
 1. 读取 MBPP v2 train parquet。
 2. 用 teacher 模型 greedy 生成一条 response。
 3. 计算 teacher 在这条 response 上每个 token 的 log-prob。
-4. 用 MBPP assert 测试 teacher response 是否全通过。
+4. 先用 `rewards/mbpp_reward.py::extract_code` 去掉 `<think>` 和 Markdown code fence，再用 MBPP assert 测试 teacher response 是否全通过。
 5. 写回新增列：
 
 | 列 | 含义 |
@@ -770,7 +772,7 @@ GRPO advantage：
 
 需要分数据线说：
 
-- MBPP `precompute_teacher_logprobs.py`：7B greedy 每题 1 条，记录 `teacher_pass`；后续 SFT 过滤 `teacher_pass=True`。这是正确样本过滤，但不是多样本 rejection sampling。
+- MBPP `precompute_teacher_logprobs.py`：7B greedy 每题 1 条，按正式 reward 的 `extract_code` 口径记录 `teacher_pass`；后续 SFT 过滤 `teacher_pass=True`。这是正确样本过滤，但不是多样本 rejection sampling。
 - MBPP `prepare_mbpp_1_5b_teacher_sft.py`：每题采样 `n=5`，选择通过测试的 response，属于明确的 passing-sample selection。
 - APPS teacher SFT：`prepare_apps_teacher_sft.py` 每题采样 `n=4`，执行测试并保留第一条 passing response，属于明确的 rejection/filtering。
 
