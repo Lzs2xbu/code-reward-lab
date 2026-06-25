@@ -53,6 +53,7 @@ resp_logits-
 
 # Local notes and non-reusable documentation
 docs/*.pdf
+docs/code_reading_qa.md
 docs/superpowers/
 docs/troubleshooting_log.md
 docs/verl_grpo_lessons.md
