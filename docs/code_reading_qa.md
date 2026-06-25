@@ -988,6 +988,46 @@ else:
 
 当前项目没有这样做，是因为 `lcb_v5_stdin_stdout.parquet` 已经满足正式 eval 的需求，且可读性更好。更准确的结论是：LCB 的 veRL 格式适合训练期 validation；非 veRL 格式适合训练后正式评估和数据分析。
 
+## Q20：这里说的 standalone 是什么？
+
+`standalone` 直译是“独立运行的”。在这里说 `standalone eval`，意思是：这个评估脚本不嵌在 veRL 训练循环里，而是训练前后都可以单独启动。
+
+例如：
+
+```bash
+python eval/eval_mbpp.py \
+    --model_path $HOME/models/eval_merged/partial_1_7b_step80 \
+    --test_file $HOME/data/mbpp_v2/mbpp_test.parquet \
+    --output_file $HOME/codellmRL/eval_results/v2_partial_step80.json \
+    --n_samples 20 \
+    --temperature 0.8 \
+    --label v2_partial_step80
+```
+
+这个命令不需要启动 `python -m verl.trainer.main_ppo`，也不依赖训练正在进行。它自己完成：
+
+1. 读取 test parquet。
+2. 加载指定 checkpoint/model。
+3. 用 vLLM 生成答案。
+4. 执行 reward/eval harness。
+5. 写出 pass@k JSON 结果。
+
+和它相对的是 veRL 训练期 validation：
+
+```bash
+python -m verl.trainer.main_ppo \
+    data.train_files=... \
+    data.val_files=... \
+    trainer.test_freq=...
+```
+
+训练期 validation 是 trainer 内部按 `test_freq` 自动跑，用来监控训练、保存 best checkpoint；standalone eval 是训练外部单独跑，用来做最终报告、模型对比和更灵活的 pass@k 评估。
+
+简单说：
+
+- `training validation`：训练过程中自动跑，嵌在 veRL 里。
+- `standalone eval`：训练外单独跑，自己指定模型、测试集、采样参数和输出文件。
+
 ## 原始数据示例
 
 以下示例来自 `data/raw/mbpp_hf_full/train.jsonl`，为阅读方便省略了 `code` 全文。
