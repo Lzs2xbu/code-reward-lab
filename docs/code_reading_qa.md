@@ -915,6 +915,79 @@ LCB 之所以拆成非 veRL 格式和 veRL 格式，是因为 LCB 更复杂：
 
 这个设计的代价是：MBPP 的 veRL parquet 不方便直接人工看原始字段，例如 `text/code/test_setup_code/challenge_test_list` 不在当前 parquet 中。如果要做更细的数据分析或 reference-code SFT，需要回到 Hugging Face 原始数据或 `data/raw/mbpp_hf_full/*.jsonl`。
 
+## Q19：MBPP 训练过程做验证时用什么数据？LCB 测试集为什么不能用 veRL 格式实现？
+
+MBPP 训练过程中的 validation 用的是 MBPP test split，而且是 veRL 格式的 parquet。
+
+以主线脚本 `scripts/run_mbpp_v2_coder_1_5b_grpo_lr5e6.sh` 为例：
+
+```bash
+TRAIN_FILE=${TRAIN_FILE:-$HOME/data/mbpp_v2/mbpp_train.parquet}
+TEST_FILE=${TEST_FILE:-$HOME/data/mbpp_v2/mbpp_test.parquet}
+
+python -m verl.trainer.main_ppo \
+    data.train_files=${TRAIN_FILE} \
+    data.val_files=${TEST_FILE} \
+    reward.custom_reward_function.path=$HOME/codellmRL/rewards/mbpp_reward.py \
+    reward.custom_reward_function.name=compute_score \
+    trainer.test_freq=${TEST_FREQ} \
+    +trainer.save_best_metric=val-core/mbpp/acc/mean@1
+```
+
+也就是说：
+
+- 训练集：`mbpp_train.parquet`
+- 训练期间验证集：`mbpp_test.parquet`
+- reward/validation 函数：`rewards/mbpp_reward.py::compute_score`
+- 保存 best checkpoint 的指标：`val-core/mbpp/acc/mean@1`
+
+这里的 validation 不是调用 `eval/eval_mbpp.py`，而是 veRL trainer 内部定期生成、执行 reward function、聚合指标。远端 veRL 默认 validation 采样参数是：
+
+```yaml
+actor_rollout_ref.rollout.val_kwargs:
+  temperature: 0
+  n: 1
+  do_sample: False
+```
+
+所以训练过程里的 validation 更接近 greedy pass@1 / mean reward 监控；训练后我们单独跑的 `eval/eval_mbpp.py` 才是正式 pass@k，例如常见设置是 `n_samples=20, temperature=0.8`。
+
+LCB 测试集不是不能用 veRL 格式实现。事实上训练过程中已经用了：
+
+```bash
+VAL_FILE=$HOME/data/lcb/lcb_v5_verl.parquet
+data.val_files=${VAL_FILE}
+reward.custom_reward_function.path=$HOME/codellmRL/rewards/lcb_reward.py
++trainer.save_best_metric=val-core/lcb/acc/mean@1
+```
+
+因此：
+
+- LCB 训练期 validation：可以、也已经使用 veRL 格式 `lcb_v5_verl.parquet`。
+- LCB 训练后 standalone eval：当前脚本使用非 veRL 格式 `lcb_v5_stdin_stdout.parquet`。
+
+为什么 standalone `eval/eval_lcb.py` 没有直接读 `lcb_v5_verl.parquet`？主要是工程选择，不是能力限制：
+
+1. `eval/eval_lcb.py` 需要 `title/difficulty/platform/execution_type/tests` 这些评估报告字段；非 veRL parquet 是扁平结构，直接好读。
+2. veRL 格式把测试用例藏在 `reward_model["ground_truth"]` 里，把元信息藏在 `extra_info` 里，更适合 trainer，不适合人工检查和报表。
+3. LCB 有 `stdin_stdout` 和 `leetcode_fn` 两类执行模式，非 veRL 格式保留 `execution_type`，方便过滤当前支持的 stdin/stdout 子集。
+4. standalone eval 要产出 per-problem JSON、by difficulty 统计、pass@k 结果，保留更多顶层字段更顺手。
+
+如果愿意改代码，完全可以让 `eval/eval_lcb.py` 支持 veRL 格式。核心适配逻辑大概是：
+
+```python
+if "tests" in df.columns:
+    tests_json = row.tests
+    messages = json.loads(row.prompt) if isinstance(row.prompt, str) else row.prompt
+    difficulty = getattr(row, "difficulty", "Unknown")
+else:
+    tests_json = row.reward_model["ground_truth"]
+    messages = row.prompt.tolist() if hasattr(row.prompt, "tolist") else row.prompt
+    difficulty = row.extra_info.get("difficulty", "Unknown")
+```
+
+当前项目没有这样做，是因为 `lcb_v5_stdin_stdout.parquet` 已经满足正式 eval 的需求，且可读性更好。更准确的结论是：LCB 的 veRL 格式适合训练期 validation；非 veRL 格式适合训练后正式评估和数据分析。
+
 ## 原始数据示例
 
 以下示例来自 `data/raw/mbpp_hf_full/train.jsonl`，为阅读方便省略了 `code` 全文。
