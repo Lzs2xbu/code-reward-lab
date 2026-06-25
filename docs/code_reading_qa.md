@@ -573,6 +573,215 @@ def run_tests(code: str, tests: list[str]) -> tuple[int, int]:
 - 后续用临时补算流程重新评测，得到 `teacher_pass=True` 共 192 条。
 - 本次修复把临时补算口径沉淀回正式预计算脚本，避免从零重跑时再次得到全 0 pass。
 
+## Q13：`apply_chat_template` 和 `model.generate` 在 teacher 生成里分别做什么？
+
+位置：`data/precompute_teacher_logprobs.py`
+
+```python
+input_ids = tokenizer.apply_chat_template(
+    messages,
+    add_generation_prompt=True,
+    return_tensors="pt",
+).to(args.device)
+
+with torch.no_grad():
+    output_ids = model.generate(
+        input_ids,
+        max_new_tokens=args.max_new_tokens,
+        do_sample=False,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+```
+
+`messages` 是 chat-format 数据，例如：
+
+```python
+[
+    {"role": "user", "content": "You are an expert Python programmer..."}
+]
+```
+
+模型不能直接吃 Python list。`tokenizer.apply_chat_template(...)` 会按当前模型 tokenizer 里的 `chat_template` 把 messages 转成模型训练时熟悉的对话格式，再 tokenize 成 `input_ids`。
+
+常用参数含义：
+
+| 参数 | 含义 |
+|---|---|
+| `messages` | chat 消息列表，每条通常有 `role` 和 `content` |
+| `add_generation_prompt=True` | 在末尾加上 assistant 开始回答的标记，告诉模型现在该生成答案 |
+| `return_tensors="pt"` | 返回 PyTorch tensor，形状通常是 `[1, prompt_len]` |
+| `tokenize=False` | 不返回 token ids，而是返回格式化后的 prompt 字符串；vLLM 批量推理常用 |
+
+可以用下面的方式查看模型真正看到的格式化文本：
+
+```python
+text = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+)
+print(text)
+```
+
+`model.generate(...)` 是自回归生成入口。它从 `input_ids` 开始，每一步：
+
+1. 模型 forward，得到下一个 token 的 logits。
+2. 根据 decoding 策略选出一个 next token。
+3. 把 next token 拼回序列。
+4. 继续生成，直到 EOS 或达到 `max_new_tokens`。
+
+这里返回的 `output_ids` 是完整序列：
+
+```text
+prompt_ids + generated_response_ids
+```
+
+所以后面需要切掉 prompt：
+
+```python
+response_ids = output_ids[0, input_ids.shape[1]:]
+response_text = tokenizer.decode(response_ids, skip_special_tokens=True)
+```
+
+`model.generate` 常见参数：
+
+| 参数 | 含义 |
+|---|---|
+| `max_new_tokens` | 最多生成多少新 token，不包含 prompt 长度 |
+| `do_sample=False` | 不采样；配合默认 `num_beams=1` 就是 greedy decoding |
+| `pad_token_id` | padding token id；decoder-only 模型常用 `eos_token_id` 代替 |
+| `attention_mask` | 标记哪些 token 是有效输入；单样本无 padding 时通常影响不大，批量 padding 时应显式传 |
+| `return_dict_in_generate=True` | 返回包含序列、scores 等字段的结构化对象 |
+| `output_scores=True` | 返回每一步生成时的分数，调试采样/概率时有用 |
+
+这段 teacher 生成实现 greedy 的关键是：
+
+```python
+do_sample=False
+# num_beams 未设置，默认是 1
+```
+
+即每一步都选当前概率最高的 token：
+
+```text
+next_token = argmax(logits)
+```
+
+因此 7B teacher 在 MBPP 预计算中是每题一条 deterministic greedy response，不是多样本采样。
+
+## Q14：multinomial sampling、beam search、temperature/top-k/top-p/repetition 分别是什么？
+
+模型每一步都会输出一个词表大小的 logits，softmax 后是：
+
+```text
+p(next_token | 当前上下文)
+```
+
+不同 decoding 策略的区别，就是面对这个分布时怎么选下一个 token。
+
+| 策略 | 做法 | 特点 |
+|---|---|---|
+| Greedy | 每步选概率最高 token | 稳定、保守、可复现 |
+| Multinomial sampling | 按概率随机抽 token | 有多样性，适合 RL rollout 生成多条 response |
+| Beam search | 同时维护多条高概率路径 | 非随机，搜索全局高概率序列，但更慢、更模板化 |
+
+采样常见配置：
+
+```python
+model.generate(
+    input_ids,
+    max_new_tokens=512,
+    do_sample=True,
+    temperature=0.7,
+    top_k=50,
+    top_p=0.95,
+)
+```
+
+它可以理解成：
+
+1. 模型输出 logits。
+2. `temperature=0.7` 调整 logits 分布，低于 1 会让分布更尖锐、更保守。
+3. `top_k=50` 只保留排名最高的 50 个 token，其余 token 置为不可选。
+4. `top_p=0.95` 在候选集合里按概率从高到低排序，保留累计概率达到 95% 的核心集合。
+5. 对最终保留的 token 重新归一化。
+6. 按概率随机抽一个 token。
+
+同时设置 `top_k=50` 和 `top_p=0.95` 时，最终候选集合通常体现为二者的交集效果：
+
+```text
+最多不超过 50 个 token，同时只保留累计概率核心区域。
+```
+
+实现细节上，不同框架的 logits warper 顺序可能略有差异；在 Hugging Face `generate` 的使用心智模型里，可以记成“先经过 temperature/top-k/top-p 等过滤和变形，再从剩余分布中采样”。
+
+重复控制用于降低模型反复生成同一片段的概率，例如：
+
+```python
+repetition_penalty=1.1
+no_repeat_ngram_size=3
+```
+
+含义：
+
+| 参数 | 含义 |
+|---|---|
+| `repetition_penalty` | 惩罚已经出现过的 token，使其后续概率下降 |
+| `no_repeat_ngram_size=3` | 不允许相同的连续 3-token 片段再次出现 |
+
+代码生成里重复控制要谨慎，因为代码天然会重复变量名、括号、缩进、`return`、`for` 等 token；惩罚太强可能伤害正确性。
+
+## Q15：对大模型来说，`system` 和 `user` 有什么区别？不都是 `message_list` 吗？
+
+是的，数据结构上它们都在同一个 `message_list` 里：
+
+```python
+[
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."},
+]
+```
+
+但经过 `apply_chat_template()` 后，不同 role 会被包装成不同的模板标记。模型实际看到的是类似：
+
+```text
+<system-role-marker>
+全局规则
+<user-role-marker>
+当前问题
+<assistant-generation-marker>
+```
+
+具体 marker 由 tokenizer 的 `chat_template` 决定。
+
+语义上：
+
+| role | 常见用途 |
+|---|---|
+| `system` | 全局行为约束、角色、输出协议、格式要求 |
+| `user` | 当前任务输入、具体题目、具体请求 |
+
+APPS 使用 system + user：
+
+```python
+[
+    {"role": "system", "content": "Write a complete Python 3 program that reads from stdin and writes to stdout..."},
+    {"role": "user", "content": "## Problem\n\n..."},
+]
+```
+
+原因是 APPS/LCB 是完整 stdin/stdout 竞赛题，输出协议比较强：必须写完整 Python 3 程序、读 stdin、写 stdout、不要 debug 输出、最好包在 Markdown code block 里。把这些稳定协议放进 `system`，具体题面放进 `user`，更符合 chat 模型的指令组织方式。
+
+MBPP 只有单条 user：
+
+```python
+[
+    {"role": "user", "content": "Problem: ... Your function must be named `xxx`. Write only the function implementation..."}
+]
+```
+
+这不是因为 MBPP 不能用 system，而是因为 MBPP 是短函数任务，约束少：只需要函数名正确、只输出函数实现。单条 user prompt 已经足够表达任务。
+
 ## 原始数据示例
 
 以下示例来自 `data/raw/mbpp_hf_full/train.jsonl`，为阅读方便省略了 `code` 全文。
