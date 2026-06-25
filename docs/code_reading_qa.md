@@ -782,6 +782,41 @@ MBPP 只有单条 user：
 
 这不是因为 MBPP 不能用 system，而是因为 MBPP 是短函数任务，约束少：只需要函数名正确、只输出函数实现。单条 user prompt 已经足够表达任务。
 
+## Q16：为什么 APPS 数据准备时要 `random.shuffle`，而 MBPP 没有？GRPO 如何避免一批都是简单题导致 reward hacking？
+
+先分清三层随机性：
+
+1. `data/prepare_apps.py` 的 `random.shuffle(rl_rows)` 和 `random.shuffle(sft_rows)` 是写 parquet 前的离线打散。脚本在 `main()` 里固定了 `random.seed(42)`，所以结果可复现。
+2. `data/prepare_mbpp.py` 当前按 Hugging Face split 顺序写 parquet，没有离线 shuffle。这不是因为 MBPP 必须保持顺序，更像是当前脚本接受了原始 split 顺序：MBPP 规模小、字段简单、没有难度标签，也没有像 APPS 那样每题多解法展开成多条 SFT 样本。
+3. GRPO 训练时，veRL 的 dataloader 还会走 `create_rl_sampler(data_config, dataset)`。veRL 默认 `data.shuffle=true`，我们的 GRPO 脚本没有显式覆盖 `data.shuffle`，所以训练阶段本身仍会随机采样；MBPP prepare 阶段不 shuffle 不等于训练按 parquet 原始顺序喂题。
+
+APPS 更需要在准备阶段 shuffle，主要是因为 APPS 原始 JSONL 容易有顺序相关性：题目可能按来源、id、难度或构造顺序排列；同时 SFT 数据每题会取最多 3 个解法，如果不打散，相邻样本可能是同一道题的不同 human solutions。离线打散可以降低连续 batch 里高度相关样本的概率，也方便之后直接抽样查看 parquet。
+
+但 shuffle 本身不能保证“每个 batch 难度均衡”。当前项目里真正能确认的防护是：
+
+- APPS 准备脚本默认只保留 `interview` 难度，过滤掉太简单的 `introductory` 和太难、reward 可能接近 0 的 `competition`。
+- APPS GRPO 脚本使用 `REWARD_MODE=partial`，不是只有全过/全错的 binary reward。
+- APPS GRPO 脚本使用 `rollout.n=8`，即每个 prompt 采 8 条 response。
+- 训练时验证集用 LCB parquet，避免只看 APPS 训练 reward。
+
+GRPO 的优势值不是把同一个 batch 里的不同题目互相比较，而是按同一个 prompt 的多次 rollout 分组比较。远端 veRL 源码里会先给每个 prompt 生成一个 `uid`，之后 `batch.repeat(repeat_times=rollout.n, interleave=True)` 让同一题的 8 个 response 共享这个 `uid`。`compute_grpo_outcome_advantage(...)` 再按 `data.non_tensor_batch["uid"]` 分组计算：
+
+```text
+score_i = reward_i
+adv_i = (score_i - mean(scores_for_same_uid)) / (std(scores_for_same_uid) + epsilon)
+```
+
+所以“一批题目都简单”不会直接让这些题和其他题跨 prompt 竞争优势值。对某一道简单题，如果 8 个 rollout 全都通过，reward 都是 1，那么组内均值也是 1，advantage 约为 0，反而没有明显 policy gradient 信号；如果 8 个 rollout 全都失败，也是同理。真正有训练信号的是同一 prompt 下 8 个 response 奖励有差异的情况。
+
+风险仍然存在，但它是数据分布层面的：如果训练集整体偏简单、测试不充分，模型会更频繁从简单题获得正向信号，并可能学到钻测试用例空子的模式。当前仓库没有实现显式的难度分层 sampler、按历史 pass rate 重采样、零优势样本剔除或 per-batch 难度配比。因此更准确的说法是：当前实现通过 APPS 难度过滤、训练 shuffle、组内 GRPO advantage、partial reward 和 LCB 验证降低风险，但没有严格保证每个 batch 都难度均衡。
+
+如果后续要把这件事做得更严格，可以加：
+
+- 数据准备阶段保留 `difficulty`、题源、prompt 长度、初始模型 pass rate 等字段，并按这些字段做 stratified sampler。
+- 训练日志按 difficulty/source/length/pass-rate bucket 统计 reward、advantage std 和有效样本比例。
+- 对同一 prompt 的 8 个 rollout 全部 reward 相同的零优势样本做跳过或重采样。
+- 对过高 pass-rate 的 prompt 降采样，对有区分度但不过难的 prompt 提权。
+
 ## 原始数据示例
 
 以下示例来自 `data/raw/mbpp_hf_full/train.jsonl`，为阅读方便省略了 `code` 全文。
